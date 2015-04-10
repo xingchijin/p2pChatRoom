@@ -1,0 +1,29 @@
+/**********************************************************************/
+/* P2P CHAT ROOM                         Author: Xingchi             **/
+/* TeamMembers: Prarav Bagree, Ryan Culter, Nicolas Mellis           **/
+/*                                                                   **/
+/* This program is used to build a p2p communication network         **/
+/* in a local environment. Given the knowledge of address informatio **/
+/* of the roomhost, every new commer will be able to join the room.  **/
+/* The room size is scalable.                                        **/
+/* It's fine when a peer voluntarily or abnormally leaves the room.  **/
+/* ********************************************************************/
+
+
+
+/* NOTES!!
+
+	1. for local chat, every node does not maintain conection to himself, so roomhost cannot make a enter room "JOIN" request
+	2. sending error has been dealt with : EOF error--> connection lost(disconnect, free resources)
+	3. When a peer abnormally crash......all informatiom about this out-of-date user will be deleted
+	4. every node has 3 connections with the roomhost(one additional connection is built for initial JOIN request, I 
+		donot want to torn it down later because this involves many error handling operations and leave it alive doesnot affect anything),
+		every normal node share 2 connections with the other normal node 
+	5. QML(UI interface) has not been added yet, but all backend APIs are already available.
+	6. Un-dealt cases: @ what if the room host crashed or left? transfer the duty or destroy the room?
+*/
+
+/* usage: 
+	go run p2pchat.go <username> (must run Bob(room host) first)
+*/
+/* sofar usernames are limited to Bob Alex Alice Lee, this restriction is for demo*/
