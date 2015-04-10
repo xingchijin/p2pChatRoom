@@ -1,46 +1,70 @@
+/**********************************************************************/
+/* P2P CHAT ROOM                         Author: Xingchi             **/
+/* TeamMembers: Prarav Bagree, Ryan Culter, Nicolas Mellis           **/
+/*                                                                   **/
+/* This program is used to build a p2p communication network         **/
+/* in a local environment. Given the knowledge of address informatio **/
+/* of the roomhost, every new commer will be able to join the room.  **/
+/* The room size is scalable.                                        **/
+/* It's fine when a peer voluntarily or abnormally leaves the room.  **/
+/* ********************************************************************/
+
+
+
+/* NOTES!!
+
+	1. for local chat, every node does not maintain conection to himself, so roomhost cannot make a enter room "JOIN" request
+	2. sending error has been dealt with : EOF error--> connection lost(disconnect, free resources)
+	3. When a peer abnormally crash......all informatiom about this out-of-date user will be deleted
+	4. every node has 3 connections with the roomhost(one additional connection is built for initial JOIN request, I 
+		donot want to torn it down later because this involves many error handling operations and leave it alive doesnot affect anything),
+		every normal node share 2 connections with the other normal node 
+	5. QML(UI interface) has not been added yet, but all backend APIs are already available.
+	6. Un-dealt cases: @ what if the room host crashed or left? transfer the duty or destroy the room?
+*/
+
+
 package main
 
 import(
 	"fmt"
 	"os"
 	"strings"
-//	"sync"
+	"sync"
 	"bufio" 
 	"net"
 	"encoding/gob"
-	"binary"
+	"io"
 )
 
 //for temporary use only!
 var users map[string]string
 
 //a map of all connections map["username"]net.Conn
-var connectionList map[string]net.Conn
+var connectionList map[string]string
+var encoderList map[string]*gob.Encoder
 var myUsrName string
+var myIP string
+var mutex=new(sync.Mutex)
+
+var roomHostName string
+var roomHostIP string
 
 // start connections, listen on server port, and collect user input
 func main() {
-	users=make(map[string]string)
-	users["Bob"]=":9999"
-	users["Alice"]=":9998"
-	users["Lee"]="=:2190"
-	users["Alex"]=":2191"
+	initSettings()
 
-	connectionList=make(map[string]net.Conn)
-
-
-	var myUsrName string= os.Args[1]
 	fmt.Println(users[myUsrName])
 	go listen(users[myUsrName])
-	 interaction()
+	interaction()
 	
 }
 
 type Message struct {
-	msgtype string
-	username string  // sender's username
+	Msgtype string
+	Username string  // sender's username
 	IP string   //sender's ip
-	msgContent string  
+	MsgContent string  
 	Usernames []string
 	IPs []string
 }
@@ -67,13 +91,20 @@ func interaction() {
 
 		if line=="exit" {
 			//disconnect and break
+			sayGoodBye()
 			break
 		}else if line=="conn" {
-			createConn("localhost","Bob")
+
+			//room host cannot send "JOIN" request
+			if myUsrName==roomHostName{
+				continue
+			}
+			introduceMyself("localhost","Bob")
 		}else {
 			//send the message out
 			fmt.Println(line)
-			msg:=createMsg("PUBLIC",myUsrName,"", line,make([]string,2),make([]string,2))
+			msg:=createMsg("MESSAGE",myUsrName,myIP, line,make([]string,2),make([]string,2))
+			
 
 			msg.sendToAll()
 		}
@@ -85,11 +116,6 @@ func interaction() {
 * Listen on the port and accept connections
 */
 func listen(port string) {
-	// tcpAddr,err:=net.ResolveTCPAddr("tcp4","localhost"+":"+port)
-	// if err!=nil {
-	// 	fmt.Fprintf(os.Stderr, "Fatal error: %s", err.Error())
-	// 	os.Exit(1)
-	// }
 
 	listener,err:=net.Listen("tcp",port)
 
@@ -111,6 +137,27 @@ func listen(port string) {
 		go recv(newCon)
 	}
 }
+/*
+* Initialize all the connections
+*/
+func initSettings(){
+	/*initial sys settings part*/
+	users=make(map[string]string)
+	users["Bob"]=":9999"
+	users["Alice"]=":9998"
+	users["Lee"]=":2190"
+	users["Alex"]=":2199"
+
+	roomHostName="Bob"
+	roomHostIP="localhost"
+
+	getMyIP()
+	connectionList=make(map[string]string)
+	encoderList=make(map[string]*gob.Encoder)
+	myUsrName = os.Args[1]
+	/*initial sys settings part*/
+
+}
 
 /*
 * keep receiving messages from the Accpted Conn 
@@ -121,63 +168,91 @@ func recv(conn net.Conn){
 
 	decoder:=gob.NewDecoder(conn)
 
-	msg:=new(Message)
+	//msg:=new(Message)
+	var msg Message
+	var sender string
 
 	for{
-		if err:=decoder.Decode(msg);err!=nil{
-			fmt.Fprintf(os.Stderr, "Fatal error: %s\n", err.Error())
-			fmt.Println("Read message error")
+		
+		if err:=decoder.Decode(&msg);err!=nil{
+			//fmt.Fprintf(os.Stderr, "Fatal error: %s\n", err.Error())
+			fmt.Printf("This connection torn down~\nRemote: %s\nLocal: %s\n",
+				conn.RemoteAddr().String(),conn.LocalAddr().String())
+			handleLEVE(sender)
+
 			return
 		}
-		fmt.Println(msg)
-		fmt.Println(msg.msgContent)
-		switch msg.msgtype{
+		//fmt.Printf("Receive message: %+v \n",&msg)
+		sender=msg.Username
+
+		switch msg.Msgtype{
 			case "MESSAGE": 
-				fmt.Println(msg.msgContent)
+				fmt.Printf("Receive Msg From %s: %s\n",msg.Username,msg.MsgContent)
+
+			//only super node can receive "JOIN" message
+			case "JOIN":
+				if !handleJOIN(&msg,conn){
+					fmt.Println("Handle connection request error!",conn.RemoteAddr().String())
+					return
+				}
+
+			//be asked to build connection(s) to teammates
+			case "ADD" :
+				addPeers(&msg)
+
+			//notified that some one has left
+			case "LEAVE": 
+				handleLEVE(msg.Username)
+
 		}
 	}
 }
 
-func createConn(IP string, targetName string) (connection net.Conn) {
+func createConn(IP string, targetName string) (net.Conn,error){
 	var targetPort string= users[targetName]
 
-	// tcpAddr, err:=net.ResolveTCPAddr("tcp",IP+targetPort)
-
-	// if err!=nil{
-	// 	fmt.Println("this guy dose not exist 1")
-	// 	return nil
-	// }
 
 	conn,err:=net.Dial("tcp",IP+targetPort)
 
 	if err!=nil{
 		fmt.Fprintf(os.Stderr, "Fatal error: %s", err.Error())
-		fmt.Println("this guy dose not exist 3",IP+targetPort)
-		return nil
+		fmt.Fprintf(os.Stderr,"this guy[%s] dose not exist \n",IP+targetPort)
+		return nil,err
 	}
 
-	connectionList[targetName]=conn
+	mutex.Lock()
+	connectionList[targetName]=IP
+	encoderList[targetName]=gob.NewEncoder(conn)
+	mutex.Unlock()
 
-	return conn
+	return conn,err
 }
 
 /*
 * send message to one user by username
 */
-func (msg *Message) sendToOne (targetName string){
+func (msg *Message)sendToOne (targetName string) error{
 
-	if connection,ok:=connectionList[targetName]; ok {
-		enc:=gob.NewEncoder(connection)
+	if enc,ok:=encoderList[targetName]; ok {
 
-		fmt.Println("in send to one ",msg.msgContent)
+		err:=enc.Encode(msg)
+		
 
-		enc.Encode(msg)
-
-		fmt.Println(binary.Size(connection))
+		if err!=nil{
+			fmt.Println(err)
+			if err==io.EOF{
+				fmt.Fprintf(os.Stderr,"Connection with %s LOST!\n",targetName)
+				handleLEVE(targetName)
+			}
+		}
+		
+		//fmt.Printf("Sent message: %+v\n",msg)
+		
+		return err
 	}else{
 		fmt.Println("The destination user doesnot exist...")
 	}
-	
+	return nil
 }
 
 /*
@@ -185,7 +260,7 @@ func (msg *Message) sendToOne (targetName string){
 */
 func (msg *Message) sendToAll(){
 	
-	for usrname,_:=range connectionList{
+	for usrname,_:=range encoderList{
 		msg.sendToOne(usrname)
 	}
 }
@@ -196,11 +271,173 @@ func (msg *Message) sendToAll(){
 
 func createMsg(kind string, myname string,myip string, MSG string, Usernames []string, IPs []string)(msg *Message){
 	msg = new(Message)
-	msg.msgtype = kind
-	msg.username = myname
+	msg.Msgtype = kind
+	msg.Username = myname
 	msg.IP = myip
-	msg.msgContent = MSG
+	msg.MsgContent = MSG
 	msg.Usernames = Usernames
 	msg.IPs = IPs
 	return 
 }
+
+/*
+* introduce myself to the rendezvous node--typically the creater of a room
+*/
+
+func introduceMyself(targetIP string, targetName string){
+	conn,err:=createConn(targetIP,targetName)
+
+	initialErr(err)
+
+	//listmsg:=new(Message)
+
+	jmsg:=createMsg("JOIN",myUsrName,targetIP,"",make([]string,0),make([]string,0))
+
+	jmsg.sendToOne(targetName)
+
+	go recv(conn)
+}
+
+/*
+* get the ipaddr of myself
+*/ 
+func getMyIP(){
+	name, err := os.Hostname()
+	initialErr(err)
+	//addr, err := net.LookupIP(name)
+	addr, err := net.ResolveIPAddr("ip",name)
+	initialErr(err)
+	myIP = string(addr.String())
+
+	return
+}
+
+/*
+* deal with the error happens at initial time. 
+* result: exit program
+*/
+
+func initialErr(err error){
+	if err!=nil {
+		fmt.Fprintf(os.Stderr,"Critical error happened when init this peer!\n")
+		os.Exit(1)
+	}
+}
+
+/*
+* handle a "JOIN" request from a new peer
+*/
+
+func handleJOIN(msg *Message, conn net.Conn) bool{
+	/*chaeck if th username already exist*/
+	enc:=gob.NewEncoder(conn)
+
+	if userExist(msg.Username) {
+		warning := createMsg("MESSAGE",myUsrName,myIP,
+			"User name already taken, Choose another one!",make([]string,0),make([]string,0))
+		
+		
+		enc.Encode(warning)
+
+		return false
+	}
+
+
+
+	/* send ADD command back to tell the applicant to make connections to teammates*/
+	teammates, IPs:=getFromMap(connectionList)
+	teammates=append(teammates,myUsrName) // the new peer need to build another connection to the host.
+	IPs=append(IPs,myIP)
+
+	if len(IPs)>0{
+		ADDMsg:=createMsg("ADD",myUsrName,myIP,"",teammates,IPs)
+		enc.Encode(ADDMsg)
+	}
+
+
+	/*ask his teammates to build connections to him*/
+	friendUsrName:=make([]string,1)
+	friendIP:=make([]string,1)
+
+	friendUsrName[0]=msg.Username
+	friendIP[0]=msg.IP
+	AddFriendMsg:=createMsg("ADD",myUsrName,myIP,"",friendUsrName,friendIP)
+	AddFriendMsg.sendToAll()
+
+
+	/*create a connection back to the applicant, add the connection to my map*/
+	/*this part has tp be the last one, because I can not ask the new peer to connect to himself*/
+	_,err:=createConn(msg.IP,msg.Username) 
+	if err!=nil {
+		warningForConn := createMsg("MESSAGE",myUsrName,myIP,
+			"Make connection error!",make([]string,0),make([]string,0))
+		enc.Encode(warningForConn)
+
+		return false
+	}
+
+	fmt.Printf("Welcome %s\n",msg.Username)
+	return true
+}
+
+/*
+* get arrays of keys and vals from  a map
+*/
+
+func getFromMap(mp map[string]string)([]string, []string){
+	var keys []string
+	var vals []string
+
+	for key,val :=range mp {
+		keys=append(keys,key)
+		vals=append(vals,val)
+	}
+	return keys,vals
+}
+
+/*
+* if the connection to that username:ip is built
+*/
+func userExist(userName string) bool{
+	_,ok := connectionList[userName]
+
+	if ok {
+		return true
+	}
+	return false
+}
+
+/*
+* After get "ADD" msg, build connections to the list
+*/
+func addPeers(msg *Message){
+	for i := 0; i < len(msg.Usernames); i++ {
+		createConn(msg.IPs[i],msg.Usernames[i])
+	}
+}
+
+/*
+* tell other peers that you are leaving
+*/
+
+func sayGoodBye(){
+	byeMsg:=createMsg("LEAVE",myUsrName,myIP,
+			"",make([]string,0),make([]string,0))
+
+	byeMsg.sendToAll()
+}
+
+/*
+* when receive a LEAVE message
+*/
+func handleLEVE(username string) {
+	if _,ok:=connectionList[username];ok {
+
+		fmt.Printf("%s has Left the room\n",username)
+		mutex.Lock()
+		delete(connectionList,username)
+		delete(encoderList,username)
+		mutex.Unlock()
+	}
+}
+
