@@ -24,6 +24,6 @@
 */
 
 /* usage: 
-	go run p2pchat.go <username> (must run Bob(room host) first)
+	go run p2pchat.go <username> <port>(must run Bob(room host) first)
 */
 /* sofar usernames are limited to Bob Alex Alice Lee, this restriction is for demo*/
